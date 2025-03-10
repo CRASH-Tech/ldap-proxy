@@ -21,7 +21,7 @@ type session struct {
 
 type ldapHandler struct {
 	sessions map[string]session
-	lock     sync.Mutex
+	lock     sync.RWMutex
 	conf     config.Config
 }
 
@@ -32,17 +32,20 @@ func connID(conn net.Conn) string {
 	return string(sha)
 }
 
-func (h ldapHandler) getSession(conn net.Conn) (session, error) {
+func (h *ldapHandler) getSession(conn net.Conn) (session, error) {
 	id := connID(conn)
-	h.lock.Lock()
+
+	h.lock.RLock()
 	s, ok := h.sessions[id]
-	h.lock.Unlock()
+	h.lock.RUnlock()
+
 	if !ok {
 		l, err := ldap.Dial("tcp", h.conf.LdapServer)
 		if err != nil {
 			return session{}, err
 		}
 		s = session{id: id, c: conn, ldap: l}
+
 		h.lock.Lock()
 		h.sessions[s.id] = s
 		h.lock.Unlock()
@@ -50,7 +53,7 @@ func (h ldapHandler) getSession(conn net.Conn) (session, error) {
 	return s, nil
 }
 
-func (h ldapHandler) Bind(bindDN, bindSimplePw string, conn net.Conn) (ldap.LDAPResultCode, error) {
+func (h *ldapHandler) Bind(bindDN, bindSimplePw string, conn net.Conn) (ldap.LDAPResultCode, error) {
 	s, err := h.getSession(conn)
 	if err != nil {
 		return ldap.LDAPResultOperationsError, err
@@ -61,7 +64,7 @@ func (h ldapHandler) Bind(bindDN, bindSimplePw string, conn net.Conn) (ldap.LDAP
 	return ldap.LDAPResultSuccess, nil
 }
 
-func (h ldapHandler) Search(boundDN string, searchReq ldap.SearchRequest, conn net.Conn) (ldap.ServerSearchResult, error) {
+func (h *ldapHandler) Search(boundDN string, searchReq ldap.SearchRequest, conn net.Conn) (ldap.ServerSearchResult, error) {
 	s, err := h.getSession(conn)
 	if err != nil {
 		return ldap.ServerSearchResult{ResultCode: ldap.LDAPResultOperationsError}, nil
@@ -92,7 +95,7 @@ func (h ldapHandler) Search(boundDN string, searchReq ldap.SearchRequest, conn n
 	return ldap.ServerSearchResult{sr.Entries, []string{}, []ldap.Control{}, ldap.LDAPResultSuccess}, nil
 }
 
-func (h ldapHandler) Close(boundDN string, conn net.Conn) error {
+func (h *ldapHandler) Close(boundDN string, conn net.Conn) error {
 	conn.Close()
 	h.lock.Lock()
 	defer h.lock.Unlock()

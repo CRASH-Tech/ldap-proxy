@@ -26,9 +26,9 @@ func (p Proxy) Start() {
 		sessions: make(map[string]session),
 		conf:     p.conf,
 	}
-	s.BindFunc("", handler)
-	s.SearchFunc("", handler)
-	s.CloseFunc("", handler)
+	s.BindFunc("", &handler)
+	s.SearchFunc("", &handler)
+	s.CloseFunc("", &handler)
 
 	if p.conf.UseTLS {
 		if err := s.ListenAndServeTLS(p.conf.Listen, p.conf.CertFile, p.conf.CertKeyFile); err != nil {

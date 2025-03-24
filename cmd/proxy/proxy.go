@@ -23,8 +23,9 @@ func (p Proxy) Start() {
 	s := ldap.NewServer()
 
 	handler := ldapHandler{
-		sessions: make(map[string]session),
-		conf:     p.conf,
+		sessions:     make(map[string]session),
+		conf:         p.conf,
+		sessionQueue: []string{},
 	}
 	s.BindFunc("", &handler)
 	s.SearchFunc("", &handler)

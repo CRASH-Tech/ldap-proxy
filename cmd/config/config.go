@@ -4,27 +4,34 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"time"
 )
 
 type Config struct {
-	LdapServer  string
-	Listen      string
-	UsersDN     string
-	UseTLS      bool
-	CertFile    string
-	CertKeyFile string
-	MaxSessions int
+	LdapServer    string
+	Listen        string
+	UsersDN       string
+	UseTLS        bool
+	CertFile      string
+	CertKeyFile   string
+	MaxSessions   int
+	MaxConnsPerIP int
+	MaxRPS        int
+	ConnTimeout   time.Duration
 }
 
 func New() *Config {
 	return &Config{
-		LdapServer:  getEnv("LDAP_SERVER", true, ""),
-		Listen:      getEnv("LISTEN", true, ""),
-		UsersDN:     getEnv("USERS_DN", true, ""),
-		UseTLS:      getEnvAsBool("USE_TLS", false, false),
-		CertFile:    getEnv("CERT_FILE", false, ""),
-		CertKeyFile: getEnv("CERT_KEY_FILE", false, ""),
-		MaxSessions: GetEnvAsInt("MAX_SESSIONS", false, 1000),
+		LdapServer:    getEnv("LDAP_SERVER", true, ""),
+		Listen:        getEnv("LISTEN", true, ""),
+		UsersDN:       getEnv("USERS_DN", true, ""),
+		UseTLS:        getEnvAsBool("USE_TLS", false, false),
+		CertFile:      getEnv("CERT_FILE", false, ""),
+		CertKeyFile:   getEnv("CERT_KEY_FILE", false, ""),
+		MaxSessions:   GetEnvAsInt("MAX_SESSIONS", false, 100),
+		MaxConnsPerIP: GetEnvAsInt("MAX_CONNS_PER_IP", false, 10),
+		MaxRPS:        GetEnvAsInt("MAX_RPS_PER_IP", false, 1),
+		ConnTimeout:   getEnvAsDuration("CONN_TIMEOUT", false, 60*time.Second),
 	}
 }
 
@@ -63,5 +70,19 @@ func GetEnvAsInt(key string, required bool, defaultVal int) int {
 		log.Fatalf("%s must be set!", key)
 	}
 
+	return defaultVal
+}
+
+func getEnvAsDuration(key string, required bool, defaultVal time.Duration) time.Duration {
+	valStr := getEnv(key, false, "")
+	if valStr == "" {
+		return defaultVal
+	}
+	if val, err := time.ParseDuration(valStr); err == nil {
+		return val
+	}
+	if required {
+		log.Fatalf("%s must be a valid duration!", key)
+	}
 	return defaultVal
 }

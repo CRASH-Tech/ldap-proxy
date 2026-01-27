@@ -26,6 +26,7 @@ func (p Proxy) Start() {
 		sessions:     make(map[string]session),
 		conf:         p.conf,
 		sessionQueue: []string{},
+		ipStates:     make(map[string]*ipState),
 	}
 	s.BindFunc("", &handler)
 	s.SearchFunc("", &handler)

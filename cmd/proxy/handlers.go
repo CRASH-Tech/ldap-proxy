@@ -2,15 +2,18 @@ package proxy
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/CRASH-Tech/ldap-proxy/cmd/config"
 	"github.com/nmcclain/ldap"
+	"golang.org/x/time/rate"
 )
 
 type session struct {
@@ -19,11 +22,18 @@ type session struct {
 	ldap *ldap.Conn
 }
 
+type ipState struct {
+	conns   int
+	limiter *rate.Limiter
+}
+
 type ldapHandler struct {
 	sessions     map[string]session
 	sessionQueue []string
 	lock         sync.RWMutex
 	conf         config.Config
+	ipStates     map[string]*ipState
+	ipLock       sync.Mutex
 }
 
 func connID(conn net.Conn) string {
@@ -33,14 +43,77 @@ func connID(conn net.Conn) string {
 	return string(sha)
 }
 
+func getIP(addr net.Addr) string {
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return addr.String()
+	}
+	return host
+}
+
+func (h *ldapHandler) checkRateLimit(ip string) bool {
+	h.ipLock.Lock()
+	defer h.ipLock.Unlock()
+
+	state, exists := h.ipStates[ip]
+	if !exists {
+		state = &ipState{
+			conns:   0,
+			limiter: rate.NewLimiter(rate.Limit(h.conf.MaxRPS), h.conf.MaxRPS),
+		}
+		h.ipStates[ip] = state
+	}
+
+	return state.limiter.Allow()
+}
+
+func (h *ldapHandler) trackConnection(ip string) error {
+	h.ipLock.Lock()
+	defer h.ipLock.Unlock()
+
+	state, exists := h.ipStates[ip]
+	if !exists {
+		state = &ipState{
+			conns:   0,
+			limiter: rate.NewLimiter(rate.Limit(h.conf.MaxRPS), h.conf.MaxRPS),
+		}
+		h.ipStates[ip] = state
+	}
+
+	if state.conns >= h.conf.MaxConnsPerIP {
+		return fmt.Errorf("too many connections from %s", ip)
+	}
+
+	state.conns++
+	return nil
+}
+
+func (h *ldapHandler) releaseConnection(ip string) {
+	h.ipLock.Lock()
+	defer h.ipLock.Unlock()
+
+	if state, exists := h.ipStates[ip]; exists {
+		state.conns--
+		if state.conns < 0 {
+			state.conns = 0
+		}
+	}
+}
+
 func (h *ldapHandler) getSession(conn net.Conn) (session, error) {
 	id := connID(conn)
+	ip := getIP(conn.RemoteAddr())
 
 	h.lock.RLock()
 	s, ok := h.sessions[id]
 	h.lock.RUnlock()
 
 	if !ok {
+		if err := h.trackConnection(ip); err != nil {
+			log.Printf("Connection limit exceeded for IP %s", ip)
+			return session{}, err
+		}
+
 		h.lock.Lock()
 		defer h.lock.Unlock()
 
@@ -58,6 +131,7 @@ func (h *ldapHandler) getSession(conn net.Conn) (session, error) {
 		log.Printf("New connection: %s", conn.RemoteAddr())
 		l, err := ldap.Dial("tcp", h.conf.LdapServer)
 		if err != nil {
+			h.releaseConnection(ip)
 			return session{}, err
 		}
 		s = session{id: id, c: conn, ldap: l}
@@ -65,10 +139,17 @@ func (h *ldapHandler) getSession(conn net.Conn) (session, error) {
 		h.sessionQueue = append(h.sessionQueue, id)
 	}
 
+	conn.SetDeadline(time.Now().Add(h.conf.ConnTimeout))
 	return s, nil
 }
 
 func (h *ldapHandler) Bind(bindDN, bindSimplePw string, conn net.Conn) (ldap.LDAPResultCode, error) {
+	ip := getIP(conn.RemoteAddr())
+	if !h.checkRateLimit(ip) {
+		log.Printf("Rate limit exceeded for IP %s", ip)
+		return ldap.LDAPResultOperationsError, errors.New("rate limit exceeded")
+	}
+
 	log.Printf("New bind connection for: %s", conn.RemoteAddr())
 	s, err := h.getSession(conn)
 	if err != nil {
@@ -82,6 +163,12 @@ func (h *ldapHandler) Bind(bindDN, bindSimplePw string, conn net.Conn) (ldap.LDA
 }
 
 func (h *ldapHandler) Search(boundDN string, searchReq ldap.SearchRequest, conn net.Conn) (ldap.ServerSearchResult, error) {
+	ip := getIP(conn.RemoteAddr())
+	if !h.checkRateLimit(ip) {
+		log.Printf("Rate limit exceeded for IP %s", ip)
+		return ldap.ServerSearchResult{ResultCode: ldap.LDAPResultOperationsError}, errors.New("rate limit exceeded")
+	}
+
 	s, err := h.getSession(conn)
 	if err != nil {
 		return ldap.ServerSearchResult{ResultCode: ldap.LDAPResultOperationsError}, nil
@@ -120,6 +207,7 @@ func (h *ldapHandler) Close(boundDN string, conn net.Conn) error {
 	id := connID(conn)
 	if s, ok := h.sessions[id]; ok {
 		log.Printf("Close connection: %s", s.c.RemoteAddr())
+		h.releaseConnection(getIP(s.c.RemoteAddr()))
 
 		s.ldap.Close()
 		delete(h.sessions, id)

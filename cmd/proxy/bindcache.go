@@ -21,38 +21,41 @@ func credHash(bindDN, password string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// pooledConn is an authenticated upstream connection kept for later reuse.
+// pooledConn is an authenticated upstream connection kept for later reuse,
+// together with the moment it was actually authenticated against the upstream.
 type pooledConn struct {
 	conn    *ldap.Conn
 	boundAt time.Time
 }
 
-// bindCache remembers recently validated credentials and keeps a pool of
-// already-authenticated upstream connections keyed by credentials. This lets
-// repeated logins with the same credentials reuse a live bound connection
-// instead of paying for a fresh upstream dial+bind on every request.
+// connPool keeps authenticated upstream connections keyed by credentials so
+// repeated logins with the same credentials can reuse a live bound connection
+// instead of dialing and binding again.
 //
-// A zero or negative ttl disables it entirely. Safe for concurrent use.
-type bindCache struct {
+// Reuse is bounded by a TTL measured from the moment a connection was actually
+// authenticated against the upstream. That timestamp (boundAt) is preserved
+// across reuse and never refreshed, so a connection is retired — and the client
+// re-validated upstream on its next login — at most ttl after its real bind,
+// even under constant load. A zero or negative ttl disables pooling. Safe for
+// concurrent use.
+type connPool struct {
 	ttl        time.Duration
 	maxPerCred int
 
-	lock  sync.Mutex
-	valid map[string]time.Time    // credHash -> bind result expiry
-	pool  map[string][]pooledConn // credHash -> idle authenticated connections
+	lock sync.Mutex
+	pool map[string][]pooledConn // credHash -> idle authenticated connections
 }
 
-// newBindCache creates a bind cache with the given TTL. maxPerCred bounds how
-// many idle connections are pooled per distinct credential. When the TTL is
-// positive a background janitor evicts expired entries and stale connections.
-func newBindCache(ttl time.Duration, maxPerCred int) *bindCache {
+// newConnPool creates a pool with the given TTL. maxPerCred bounds how many
+// idle connections are kept per distinct credential. When the TTL is positive a
+// background janitor closes connections once they outlive it.
+func newConnPool(ttl time.Duration, maxPerCred int) *connPool {
 	if maxPerCred < 1 {
 		maxPerCred = 1
 	}
-	c := &bindCache{
+	c := &connPool{
 		ttl:        ttl,
 		maxPerCred: maxPerCred,
-		valid:      make(map[string]time.Time),
 		pool:       make(map[string][]pooledConn),
 	}
 	if c.enabled() {
@@ -61,40 +64,17 @@ func newBindCache(ttl time.Duration, maxPerCred int) *bindCache {
 	return c
 }
 
-// enabled reports whether bind caching / connection pooling is turned on.
-func (c *bindCache) enabled() bool {
+// enabled reports whether connection pooling is turned on.
+func (c *connPool) enabled() bool {
 	return c.ttl > 0
 }
 
-// known reports whether the given credentials were successfully validated
-// within the TTL window.
-func (c *bindCache) known(credHash string) bool {
+// borrow returns an idle authenticated connection for credHash together with
+// the time it was originally bound. Connections that have outlived the TTL are
+// closed and skipped, never handed out.
+func (c *connPool) borrow(credHash string) (*ldap.Conn, time.Time, bool) {
 	if !c.enabled() {
-		return false
-	}
-	c.lock.Lock()
-	defer c.lock.Unlock()
-
-	exp, ok := c.valid[credHash]
-	return ok && time.Now().Before(exp)
-}
-
-// remember records that credHash was successfully bound, refreshing its TTL.
-func (c *bindCache) remember(credHash string) {
-	if !c.enabled() {
-		return
-	}
-	c.lock.Lock()
-	c.valid[credHash] = time.Now().Add(c.ttl)
-	c.lock.Unlock()
-}
-
-// borrow returns a fresh idle authenticated connection for credHash if one is
-// available. The returned connection is removed from the pool and owned by the
-// caller until it is released again. Stale connections are closed and skipped.
-func (c *bindCache) borrow(credHash string) (*ldap.Conn, bool) {
-	if !c.enabled() {
-		return nil, false
+		return nil, time.Time{}, false
 	}
 	c.lock.Lock()
 	defer c.lock.Unlock()
@@ -105,19 +85,20 @@ func (c *bindCache) borrow(credHash string) (*ldap.Conn, bool) {
 		conns = conns[:len(conns)-1]
 		if time.Since(last.boundAt) < c.ttl {
 			c.pool[credHash] = conns
-			return last.conn, true
+			return last.conn, last.boundAt, true
 		}
-		last.conn.Close() // expired: discard
+		last.conn.Close() // outlived its TTL: discard
 	}
 	delete(c.pool, credHash)
-	return nil, false
+	return nil, time.Time{}, false
 }
 
-// release returns an authenticated connection to the pool for reuse. It reports
-// whether the connection was accepted; when it returns false the caller must
-// close the connection itself (caching disabled, no credentials, connection too
-// old, or the pool for this credential is full).
-func (c *bindCache) release(credHash string, conn *ldap.Conn, boundAt time.Time) bool {
+// release returns a connection to the pool for reuse, preserving its original
+// bind time. It reports whether the connection was accepted; when it returns
+// false the caller must close the connection itself (pooling disabled, empty
+// credentials, connection already past its TTL, or the pool for this credential
+// is full).
+func (c *connPool) release(credHash string, conn *ldap.Conn, boundAt time.Time) bool {
 	if !c.enabled() || credHash == "" {
 		return false
 	}
@@ -134,20 +115,15 @@ func (c *bindCache) release(credHash string, conn *ldap.Conn, boundAt time.Time)
 	return true
 }
 
-// janitor periodically drops expired credentials and closes stale pooled
-// connections so neither map grows without bound.
-func (c *bindCache) janitor() {
+// janitor periodically closes pooled connections that have outlived the TTL so
+// the pool does not grow without bound and stale connections are not reused.
+func (c *connPool) janitor() {
 	ticker := time.NewTicker(c.ttl)
 	defer ticker.Stop()
 
 	for range ticker.C {
 		now := time.Now()
 		c.lock.Lock()
-		for k, exp := range c.valid {
-			if now.After(exp) {
-				delete(c.valid, k)
-			}
-		}
 		for k, conns := range c.pool {
 			kept := conns[:0]
 			for _, pc := range conns {

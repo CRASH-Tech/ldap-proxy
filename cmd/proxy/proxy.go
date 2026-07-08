@@ -35,7 +35,7 @@ func (p Proxy) Start() {
 		sessionQueue: []string{},
 		ipStates:     make(map[string]*ipState),
 		cache:        newSearchCache(p.conf.CacheTTL),
-		binds:        newBindCache(p.conf.CacheTTL, p.conf.MaxConnsPerIP),
+		binds:        newConnPool(p.conf.CacheTTL, p.conf.MaxConnsPerIP),
 	}
 	s.BindFunc("", &handler)
 	s.SearchFunc("", &handler)

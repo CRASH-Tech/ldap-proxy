@@ -38,7 +38,7 @@ type ldapHandler struct {
 	ipStates     map[string]*ipState
 	ipLock       sync.Mutex
 	cache        *searchCache
-	binds        *bindCache
+	binds        *connPool
 }
 
 func connID(conn net.Conn) string {
@@ -179,7 +179,9 @@ func (h *ldapHandler) getSession(conn net.Conn) (session, error) {
 
 // attachSession installs an already-authenticated upstream connection as the
 // session for a client connection, replacing any previous upstream connection.
-func (h *ldapHandler) attachSession(conn net.Conn, upstream *ldap.Conn, credHash string) error {
+// boundAt is the connection's original upstream authentication time and is
+// preserved so reuse never extends its TTL.
+func (h *ldapHandler) attachSession(conn net.Conn, upstream *ldap.Conn, credHash string, boundAt time.Time) error {
 	id := connID(conn)
 	ip := getIP(conn.RemoteAddr())
 
@@ -190,7 +192,7 @@ func (h *ldapHandler) attachSession(conn net.Conn, upstream *ldap.Conn, credHash
 		h.retireUpstream(existing)
 		existing.ldap = upstream
 		existing.credHash = credHash
-		existing.boundAt = time.Now()
+		existing.boundAt = boundAt
 		h.sessions[id] = existing
 		conn.SetDeadline(time.Now().Add(h.conf.ConnTimeout))
 		return nil
@@ -203,7 +205,7 @@ func (h *ldapHandler) attachSession(conn net.Conn, upstream *ldap.Conn, credHash
 
 	h.evictLocked()
 
-	s := session{id: id, c: conn, ldap: upstream, credHash: credHash, boundAt: time.Now()}
+	s := session{id: id, c: conn, ldap: upstream, credHash: credHash, boundAt: boundAt}
 	h.sessions[id] = s
 	h.sessionQueue = append(h.sessionQueue, id)
 	conn.SetDeadline(time.Now().Add(h.conf.ConnTimeout))
@@ -252,13 +254,14 @@ func (h *ldapHandler) Bind(bindDN, bindSimplePw string, conn net.Conn) (ldap.LDA
 	ch := credHash(bindDN, bindSimplePw)
 
 	// Fast path: reuse a pooled connection already authenticated with these
-	// exact credentials, skipping the upstream dial+bind entirely.
-	if upstream, ok := h.binds.borrow(ch); ok {
-		if err := h.attachSession(conn, upstream, ch); err != nil {
-			h.binds.release(ch, upstream, time.Now())
+	// exact credentials, skipping the upstream dial+bind entirely. Its original
+	// bind time is preserved so the TTL is measured from the real bind, not
+	// from this reuse.
+	if upstream, boundAt, ok := h.binds.borrow(ch); ok {
+		if err := h.attachSession(conn, upstream, ch, boundAt); err != nil {
+			h.binds.release(ch, upstream, boundAt)
 			return ldap.LDAPResultOperationsError, err
 		}
-		h.binds.remember(ch)
 		log.Printf("P: Bind CACHE HIT (pooled) for %s", bindDN)
 		return ldap.LDAPResultSuccess, nil
 	}
@@ -269,9 +272,11 @@ func (h *ldapHandler) Bind(bindDN, bindSimplePw string, conn net.Conn) (ldap.LDA
 		return ldap.LDAPResultOperationsError, err
 	}
 
-	// The connection is already bound with the same, recently validated
-	// credentials (client re-binding): no need to hit the upstream again.
-	if s.credHash == ch && h.binds.known(ch) {
+	// The connection is already bound with the same credentials (client
+	// re-binding) and that bind is still within the TTL: no need to hit the
+	// upstream again. boundAt is not refreshed, so the connection still expires
+	// TTL after its real bind even under repeated re-binds.
+	if s.credHash == ch && h.conf.CacheTTL > 0 && time.Since(s.boundAt) < h.conf.CacheTTL {
 		log.Printf("P: Bind CACHE HIT (session) for %s", bindDN)
 		return ldap.LDAPResultSuccess, nil
 	}
@@ -283,7 +288,6 @@ func (h *ldapHandler) Bind(bindDN, bindSimplePw string, conn net.Conn) (ldap.LDA
 	}
 
 	h.setSessionCreds(conn, ch)
-	h.binds.remember(ch)
 
 	return ldap.LDAPResultSuccess, nil
 }

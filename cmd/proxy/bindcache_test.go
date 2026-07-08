@@ -20,45 +20,65 @@ func TestCredHash(t *testing.T) {
 	}
 }
 
-func TestBindCacheKnownRemember(t *testing.T) {
-	c := newBindCache(time.Minute, 4)
+func TestConnPoolBorrowRelease(t *testing.T) {
+	c := newConnPool(time.Minute, 4)
 
 	ch := credHash("cn=admin", "secret")
-	if c.known(ch) {
-		t.Fatal("unknown credentials must not be reported as known")
-	}
-
-	c.remember(ch)
-	if !c.known(ch) {
-		t.Fatal("credentials must be known after remember")
-	}
-}
-
-func TestBindCacheBorrowRelease(t *testing.T) {
-	c := newBindCache(time.Minute, 4)
-
-	ch := credHash("cn=admin", "secret")
-	if _, ok := c.borrow(ch); ok {
+	if _, _, ok := c.borrow(ch); ok {
 		t.Fatal("borrow from empty pool must miss")
 	}
 
 	conn := &ldap.Conn{}
-	if !c.release(ch, conn, time.Now()) {
+	boundAt := time.Now()
+	if !c.release(ch, conn, boundAt) {
 		t.Fatal("release into an empty pool must succeed")
 	}
 
-	got, ok := c.borrow(ch)
+	got, gotBoundAt, ok := c.borrow(ch)
 	if !ok || got != conn {
 		t.Fatal("borrow must return the released connection")
 	}
+	if !gotBoundAt.Equal(boundAt) {
+		t.Fatal("borrow must return the original bind time")
+	}
 
-	if _, ok := c.borrow(ch); ok {
+	if _, _, ok := c.borrow(ch); ok {
 		t.Fatal("connection must not be handed out twice")
 	}
 }
 
-func TestBindCacheReleaseRejectsWhenFull(t *testing.T) {
-	c := newBindCache(time.Minute, 2)
+// TestConnPoolTTLFromRealBind proves that reuse does not extend a connection's
+// lifetime: once it has outlived the TTL measured from its original bind, it is
+// neither pooled nor handed out, even if it keeps being released.
+func TestConnPoolTTLFromRealBind(t *testing.T) {
+	c := newConnPool(30*time.Millisecond, 4)
+	ch := credHash("cn=admin", "secret")
+
+	boundAt := time.Now()
+	if !c.release(ch, &ldap.Conn{}, boundAt) {
+		t.Fatal("fresh connection must be poolable")
+	}
+
+	// A borrow within the TTL succeeds but keeps the original bind time.
+	_, gotBoundAt, ok := c.borrow(ch)
+	if !ok || !gotBoundAt.Equal(boundAt) {
+		t.Fatal("reuse must preserve the original bind time")
+	}
+
+	// Simulate the connection being reused right up to the edge of the TTL:
+	// releasing it again with its ORIGINAL bind time (never refreshed) must be
+	// rejected once that time is older than the TTL.
+	time.Sleep(40 * time.Millisecond)
+	if c.release(ch, &ldap.Conn{}, boundAt) {
+		t.Fatal("a connection past its TTL must not be pooled, even under constant reuse")
+	}
+	if _, _, ok := c.borrow(ch); ok {
+		t.Fatal("nothing must be borrowable after the TTL")
+	}
+}
+
+func TestConnPoolReleaseRejectsWhenFull(t *testing.T) {
+	c := newConnPool(time.Minute, 2)
 	ch := credHash("cn=admin", "secret")
 
 	if !c.release(ch, &ldap.Conn{}, time.Now()) || !c.release(ch, &ldap.Conn{}, time.Now()) {
@@ -69,8 +89,8 @@ func TestBindCacheReleaseRejectsWhenFull(t *testing.T) {
 	}
 }
 
-func TestBindCacheReleaseRejectsStale(t *testing.T) {
-	c := newBindCache(time.Minute, 4)
+func TestConnPoolReleaseRejectsStale(t *testing.T) {
+	c := newConnPool(time.Minute, 4)
 	ch := credHash("cn=admin", "secret")
 
 	if c.release(ch, &ldap.Conn{}, time.Now().Add(-2*time.Minute)) {
@@ -78,21 +98,17 @@ func TestBindCacheReleaseRejectsStale(t *testing.T) {
 	}
 }
 
-func TestBindCacheDisabled(t *testing.T) {
-	c := newBindCache(0, 4)
+func TestConnPoolDisabled(t *testing.T) {
+	c := newConnPool(0, 4)
 	if c.enabled() {
-		t.Fatal("zero TTL must disable the bind cache")
+		t.Fatal("zero TTL must disable the connection pool")
 	}
 
 	ch := credHash("cn=admin", "secret")
-	c.remember(ch)
-	if c.known(ch) {
-		t.Fatal("disabled bind cache must never report known")
-	}
 	if c.release(ch, &ldap.Conn{}, time.Now()) {
-		t.Fatal("disabled bind cache must not pool connections")
+		t.Fatal("disabled pool must not pool connections")
 	}
-	if _, ok := c.borrow(ch); ok {
-		t.Fatal("disabled bind cache must not hand out connections")
+	if _, _, ok := c.borrow(ch); ok {
+		t.Fatal("disabled pool must not hand out connections")
 	}
 }

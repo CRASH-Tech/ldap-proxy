@@ -44,6 +44,26 @@ func TestSearchCacheExpiry(t *testing.T) {
 	}
 }
 
+// TestSearchCacheReadsDoNotExtendTTL proves that repeatedly reading a cached
+// entry does not refresh its expiry: it still expires TTL after it was set.
+func TestSearchCacheReadsDoNotExtendTTL(t *testing.T) {
+	c := newSearchCache(40 * time.Millisecond)
+
+	key := cacheKey("dc=example,dc=com", "(objectClass=*)", 2, nil)
+	c.set(key, []*ldap.Entry{{DN: "a"}})
+
+	// Keep hitting the entry across most of its lifetime.
+	deadline := time.Now().Add(60 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		c.get(key)
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if _, ok := c.get(key); ok {
+		t.Fatal("entry must expire TTL after set, regardless of reads")
+	}
+}
+
 func TestSearchCacheDisabled(t *testing.T) {
 	c := newSearchCache(0)
 	if c.enabled() {

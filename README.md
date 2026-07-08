@@ -92,10 +92,14 @@ of **already-authenticated upstream connections**, keyed by credentials:
 - When a client binds, a pooled connection for the **same credentials** is
   reused if available, skipping the upstream dial+bind entirely. On close, the
   authenticated connection is returned to the pool instead of being torn down.
-- The pool and the "known-good credentials" markers honour the same `CACHE_TTL`
-  as the response cache. Connections older than the TTL are never reused and are
-  closed by the background janitor. Setting `CACHE_TTL=0` disables this along
-  with response caching, restoring the original dial+bind-per-request behaviour.
+- Reuse is bounded by `CACHE_TTL` measured from the moment the connection was
+  **actually authenticated** against the upstream. This timestamp is preserved
+  across reuse and never refreshed, so a connection is retired — and the client
+  re-validated upstream on its next login — at most `CACHE_TTL` after its real
+  bind, **even under constant load**. Connections past the TTL are never reused
+  and are closed by the background janitor. Setting `CACHE_TTL=0` disables this
+  along with response caching, restoring the original dial+bind-per-request
+  behaviour.
 - Credentials are keyed by a salted-in SHA-256 of the bind DN **and** password,
   so a pooled connection is only ever reused by a client that presents the exact
   same credentials — reuse never bypasses authentication. Passwords are not
@@ -170,7 +174,7 @@ go vet ./...     # static checks
 | `cmd/proxy/proxy.go`    | LDAP server setup and lifecycle. |
 | `cmd/proxy/handlers.go` | Bind/Search/Close handlers, session pool, rate limiting. |
 | `cmd/proxy/cache.go`    | In-memory TTL cache for search responses. |
-| `cmd/proxy/bindcache.go`| Bind-result cache and authenticated upstream connection pool. |
+| `cmd/proxy/bindcache.go`| Authenticated upstream connection pool (bind reuse). |
 
 ## License
 

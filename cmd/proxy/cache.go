@@ -46,16 +46,21 @@ func (c *searchCache) enabled() bool {
 	return c.ttl > 0
 }
 
-// cacheKey builds a stable key for a search request. boundDN is part of the
-// key so that results are never shared between different authenticated
-// identities. Attributes are sorted so that requests that ask for the same
-// set of attributes in a different order hit the same entry.
-func cacheKey(boundDN, baseDN, filter string, scope int, attrs []string) string {
+// cacheKey builds a stable key for a search request from the query itself: the
+// base DN, the (already rewritten) filter, the scope and the requested
+// attribute set. Attributes are sorted so that requests asking for the same set
+// in a different order hit the same entry.
+//
+// The key deliberately does not include the bound identity, so identical
+// queries issued by different clients share a cache entry. This assumes the
+// upstream returns the same result regardless of who is bound (e.g. the queried
+// attributes are world-readable), which holds for this proxy's use cases.
+func cacheKey(baseDN, filter string, scope int, attrs []string) string {
 	sorted := append([]string(nil), attrs...)
 	sort.Strings(sorted)
 
 	h := sha256.New()
-	for _, part := range []string{boundDN, baseDN, filter, strconv.Itoa(scope), strings.Join(sorted, ",")} {
+	for _, part := range []string{baseDN, filter, strconv.Itoa(scope), strings.Join(sorted, ",")} {
 		h.Write([]byte(part))
 		h.Write([]byte{0})
 	}

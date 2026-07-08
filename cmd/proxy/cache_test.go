@@ -10,7 +10,7 @@ import (
 func TestSearchCacheHitAndMiss(t *testing.T) {
 	c := newSearchCache(time.Minute)
 
-	key := cacheKey("cn=admin", "dc=example,dc=com", "(uid=jdoe)", 2, []string{"cn", "uid"})
+	key := cacheKey("dc=example,dc=com", "(uid=jdoe)", 2, []string{"cn", "uid"})
 	if _, ok := c.get(key); ok {
 		t.Fatal("expected miss on empty cache")
 	}
@@ -30,7 +30,7 @@ func TestSearchCacheHitAndMiss(t *testing.T) {
 func TestSearchCacheExpiry(t *testing.T) {
 	c := newSearchCache(20 * time.Millisecond)
 
-	key := cacheKey("", "dc=example,dc=com", "(objectClass=*)", 2, nil)
+	key := cacheKey("dc=example,dc=com", "(objectClass=*)", 2, nil)
 	c.set(key, []*ldap.Entry{{DN: "a"}})
 
 	if _, ok := c.get(key); !ok {
@@ -50,7 +50,7 @@ func TestSearchCacheDisabled(t *testing.T) {
 		t.Fatal("cache with zero ttl must be disabled")
 	}
 
-	key := cacheKey("", "dc=example,dc=com", "(objectClass=*)", 2, nil)
+	key := cacheKey("dc=example,dc=com", "(objectClass=*)", 2, nil)
 	c.set(key, []*ldap.Entry{{DN: "a"}})
 	if _, ok := c.get(key); ok {
 		t.Fatal("disabled cache must always miss")
@@ -58,14 +58,14 @@ func TestSearchCacheDisabled(t *testing.T) {
 }
 
 func TestCacheKeyAttributeOrderIndependent(t *testing.T) {
-	k1 := cacheKey("dn", "base", "(uid=x)", 2, []string{"cn", "mail"})
-	k2 := cacheKey("dn", "base", "(uid=x)", 2, []string{"mail", "cn"})
+	k1 := cacheKey("base", "(uid=x)", 2, []string{"cn", "mail"})
+	k2 := cacheKey("base", "(uid=x)", 2, []string{"mail", "cn"})
 	if k1 != k2 {
 		t.Fatal("cache key must not depend on attribute order")
 	}
 
-	k3 := cacheKey("dn2", "base", "(uid=x)", 2, []string{"cn", "mail"})
+	k3 := cacheKey("base", "(uid=y)", 2, []string{"cn", "mail"})
 	if k1 == k3 {
-		t.Fatal("cache key must depend on boundDN")
+		t.Fatal("cache key must depend on the filter")
 	}
 }

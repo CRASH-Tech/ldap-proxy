@@ -3,6 +3,7 @@ package proxy
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -104,12 +105,19 @@ func (c *searchCache) janitor() {
 
 	for range ticker.C {
 		now := time.Now()
+		removed := 0
 		c.lock.Lock()
 		for k, v := range c.items {
 			if now.After(v.expiresAt) {
 				delete(c.items, k)
+				removed++
 			}
 		}
+		remaining := len(c.items)
 		c.lock.Unlock()
+
+		if removed > 0 {
+			log.Printf("P: Search cache cleanup: removed %d expired entries, %d remaining", removed, remaining)
+		}
 	}
 }

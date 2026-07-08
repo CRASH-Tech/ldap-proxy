@@ -3,6 +3,7 @@ package proxy
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"log"
 	"sync"
 	"time"
 
@@ -123,6 +124,8 @@ func (c *connPool) janitor() {
 
 	for range ticker.C {
 		now := time.Now()
+		closed := 0
+		remaining := 0
 		c.lock.Lock()
 		for k, conns := range c.pool {
 			kept := conns[:0]
@@ -131,14 +134,20 @@ func (c *connPool) janitor() {
 					kept = append(kept, pc)
 				} else {
 					pc.conn.Close()
+					closed++
 				}
 			}
 			if len(kept) == 0 {
 				delete(c.pool, k)
 			} else {
 				c.pool[k] = kept
+				remaining += len(kept)
 			}
 		}
 		c.lock.Unlock()
+
+		if closed > 0 {
+			log.Printf("P: Connection pool cleanup: closed %d stale connections, %d remaining", closed, remaining)
+		}
 	}
 }

@@ -60,7 +60,10 @@ must be set or the process exits on startup.
 | `CACHE_TTL`        |          | `5m`    | TTL for both the search response cache and the bind cache / connection pool, as a Go duration. Set to `0` to disable caching and connection reuse. |
 
 Duration values use Go's [`time.ParseDuration`](https://pkg.go.dev/time#ParseDuration)
-syntax (`300ms`, `10s`, `5m`, `1h`, …).
+syntax (`300ms`, `10s`, `5m`, `1h`, …). A **unit is required**: a bare number is
+interpreted as a whole number of **seconds** (so `CACHE_TTL=1` means `1s`), and
+a value that is neither a valid duration nor an integer makes the proxy exit on
+startup rather than silently falling back to the default.
 
 ### Caching
 

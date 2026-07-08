@@ -83,13 +83,26 @@ func GetEnvAsInt(key string, required bool, defaultVal int) int {
 func getEnvAsDuration(key string, required bool, defaultVal time.Duration) time.Duration {
 	valStr := getEnv(key, false, "")
 	if valStr == "" {
+		if required {
+			log.Fatalf("%s must be set!", key)
+		}
 		return defaultVal
 	}
+
+	// A Go duration string, e.g. "500ms", "30s", "5m", "1h".
 	if val, err := time.ParseDuration(valStr); err == nil {
 		return val
 	}
-	if required {
-		log.Fatalf("%s must be a valid duration!", key)
+
+	// A bare whole number is interpreted as seconds, so "1" means 1s. This
+	// matches the common expectation and avoids the surprising case where a
+	// unit-less value silently falls back to the default.
+	if secs, err := strconv.Atoi(valStr); err == nil {
+		return time.Duration(secs) * time.Second
 	}
+
+	// A non-empty but unparseable value is a configuration error: fail loudly
+	// rather than silently masking it with the default.
+	log.Fatalf("%s must be a valid duration (e.g. \"5m\", \"30s\") or a whole number of seconds, got %q", key, valStr)
 	return defaultVal
 }

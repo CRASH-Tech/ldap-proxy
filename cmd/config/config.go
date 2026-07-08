@@ -1,3 +1,4 @@
+// Package config loads the proxy configuration from environment variables.
 package config
 
 import (
@@ -7,6 +8,8 @@ import (
 	"time"
 )
 
+// Config holds the runtime configuration of the proxy. See the README for the
+// environment variable that backs each field and its default value.
 type Config struct {
 	LdapServer    string
 	Listen        string
@@ -18,8 +21,11 @@ type Config struct {
 	MaxConnsPerIP int
 	MaxRPS        int
 	ConnTimeout   time.Duration
+	CacheTTL      time.Duration
 }
 
+// New reads the configuration from the environment. It terminates the process
+// if a required variable is missing.
 func New() *Config {
 	return &Config{
 		LdapServer:    getEnv("LDAP_SERVER", true, ""),
@@ -32,6 +38,7 @@ func New() *Config {
 		MaxConnsPerIP: GetEnvAsInt("MAX_CONNS_PER_IP", false, 10),
 		MaxRPS:        GetEnvAsInt("MAX_RPS_PER_IP", false, 1),
 		ConnTimeout:   getEnvAsDuration("CONN_TIMEOUT", false, 60*time.Second),
+		CacheTTL:      getEnvAsDuration("CACHE_TTL", false, 5*time.Minute),
 	}
 }
 

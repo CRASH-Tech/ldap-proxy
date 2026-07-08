@@ -34,6 +34,7 @@ type ldapHandler struct {
 	conf         config.Config
 	ipStates     map[string]*ipState
 	ipLock       sync.Mutex
+	cache        *searchCache
 }
 
 func connID(conn net.Conn) string {
@@ -171,7 +172,7 @@ func (h *ldapHandler) Search(boundDN string, searchReq ldap.SearchRequest, conn 
 
 	s, err := h.getSession(conn)
 	if err != nil {
-		return ldap.ServerSearchResult{ResultCode: ldap.LDAPResultOperationsError}, nil
+		return ldap.ServerSearchResult{ResultCode: ldap.LDAPResultOperationsError}, err
 	}
 
 	f := searchReq.Filter
@@ -184,6 +185,12 @@ func (h *ldapHandler) Search(boundDN string, searchReq ldap.SearchRequest, conn 
 		})
 	}
 
+	key := cacheKey(boundDN, searchReq.BaseDN, f, int(searchReq.Scope), searchReq.Attributes)
+	if entries, ok := h.cache.get(key); ok {
+		log.Printf("P: Search CACHE HIT: %s -> num of entries = %d\n", f, len(entries))
+		return ldap.ServerSearchResult{entries, []string{}, []ldap.Control{}, ldap.LDAPResultSuccess}, nil
+	}
+
 	search := ldap.NewSearchRequest(
 		searchReq.BaseDN,
 		ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
@@ -194,6 +201,8 @@ func (h *ldapHandler) Search(boundDN string, searchReq ldap.SearchRequest, conn 
 	if err != nil {
 		return ldap.ServerSearchResult{}, err
 	}
+
+	h.cache.set(key, sr.Entries)
 
 	log.Printf("P: Search OK: %s -> num of entries = %d\n", f, len(sr.Entries))
 

@@ -1,1 +1,138 @@
 # ldap-proxy
+
+A lightweight LDAP proxy written in Go. It sits in front of an upstream LDAP
+server, transparently forwarding **bind** and **search** requests while adding:
+
+- **Query rewriting** — rewrites `sudo`-style group lookups so that existing
+  LDAP/`sudo-ldap` clients work against a standard directory (see
+  [Query rewriting](#query-rewriting)).
+- **Response caching** — caches search results for a configurable TTL to reduce
+  load on the upstream server (see [Caching](#caching)).
+- **Connection pooling** — reuses a bounded pool of upstream connections keyed
+  per client connection.
+- **Rate limiting & abuse protection** — per-IP request rate limiting and a
+  per-IP concurrent-connection cap.
+- **Optional TLS** (LDAPS) termination.
+
+## How it works
+
+```
+LDAP client ──▶ ldap-proxy ──▶ upstream LDAP server
+                   │
+                   ├─ per-IP rate limit / connection cap
+                   ├─ session pool (bounded, LRU-evicted)
+                   ├─ query rewriting (sudoUser → member)
+                   └─ search response cache (TTL)
+```
+
+For each incoming client connection the proxy opens (and reuses) a connection to
+the upstream server. Bind requests are forwarded as-is. Search requests are
+optionally rewritten, served from cache when possible, and otherwise forwarded
+upstream (the result is then cached).
+
+> **Note:** The proxy always issues the upstream search with
+> `ScopeWholeSubtree`, regardless of the scope requested by the client.
+
+## Configuration
+
+All configuration is supplied via environment variables. **Required** variables
+must be set or the process exits on startup.
+
+| Variable           | Required | Default | Description |
+| ------------------ | :------: | ------- | ----------- |
+| `LDAP_SERVER`      | ✅       | —       | Upstream LDAP server address, `host:port` (e.g. `ldap.example.com:389`). |
+| `LISTEN`           | ✅       | —       | Address the proxy listens on, `host:port` (e.g. `0.0.0.0:389`). |
+| `USERS_DN`         | ✅       | —       | Base DN for users, used when rewriting `sudoUser` filters (e.g. `ou=users,dc=example,dc=com`). |
+| `USE_TLS`          |          | `false` | Serve LDAPS (TLS). When `true`, `CERT_FILE` and `CERT_KEY_FILE` are required. |
+| `CERT_FILE`        |          | —       | Path to the TLS certificate (PEM). Used only when `USE_TLS=true`. |
+| `CERT_KEY_FILE`    |          | —       | Path to the TLS private key (PEM). Used only when `USE_TLS=true`. |
+| `MAX_SESSIONS`     |          | `100`   | Maximum number of pooled upstream connections. The oldest is evicted (LRU) when the limit is reached. |
+| `MAX_CONNS_PER_IP` |          | `10`    | Maximum concurrent client connections from a single IP. |
+| `MAX_RPS_PER_IP`   |          | `1`     | Maximum requests per second per IP (token-bucket, burst = this value). |
+| `CONN_TIMEOUT`     |          | `60s`   | Client connection deadline, as a Go duration (e.g. `30s`, `2m`). |
+| `CACHE_TTL`        |          | `5m`    | How long search responses are cached, as a Go duration. Set to `0` to disable caching. |
+
+Duration values use Go's [`time.ParseDuration`](https://pkg.go.dev/time#ParseDuration)
+syntax (`300ms`, `10s`, `5m`, `1h`, …).
+
+### Caching
+
+Search responses are cached in memory to reduce load on the upstream server.
+
+- The TTL is controlled by `CACHE_TTL` (default **5 minutes**).
+- Set `CACHE_TTL=0` to **disable** caching entirely.
+- The cache key is derived from the **bound DN**, base DN, the (rewritten)
+  filter, the requested scope, and the requested attribute set (attribute order
+  does not matter). Including the bound DN ensures results are never shared
+  between different authenticated identities.
+- Expired entries are evicted lazily on access and by a background janitor, so
+  the cache does not grow without bound.
+
+Cache hits are logged as `P: Search CACHE HIT: ...`.
+
+### Query rewriting
+
+When a search filter contains both `objectClass=group` and `sudoUser=<name>`,
+each `sudoUser=<name>` term is rewritten to
+`member=cn=<name>,${USERS_DN}`. This lets `sudo`'s LDAP integration resolve a
+user's sudo rules via standard group membership.
+
+Example (`USERS_DN=ou=users,dc=example,dc=com`):
+
+```
+(&(objectClass=group)(sudoUser=jdoe))
+        ⇓
+(&(objectClass=group)(member=cn=jdoe,ou=users,dc=example,dc=com))
+```
+
+## Running
+
+### Docker
+
+```sh
+docker run -d --name ldap-proxy \
+  -p 389:389 \
+  -e LDAP_SERVER=ldap.example.com:389 \
+  -e LISTEN=0.0.0.0:389 \
+  -e USERS_DN=ou=users,dc=example,dc=com \
+  -e CACHE_TTL=5m \
+  crashntech/ldap-proxy:latest
+```
+
+Images are published to Docker Hub as `crashntech/ldap-proxy` on each GitHub
+release.
+
+### From source
+
+```sh
+go build -o ldap-proxy .
+
+LDAP_SERVER=ldap.example.com:389 \
+LISTEN=0.0.0.0:389 \
+USERS_DN=ou=users,dc=example,dc=com \
+./ldap-proxy
+```
+
+Requires Go 1.23+.
+
+## Development
+
+```sh
+go build ./...   # build
+go test ./...    # run tests
+go vet ./...     # static checks
+```
+
+## Project layout
+
+| Path                    | Description |
+| ----------------------- | ----------- |
+| `main.go`               | Entry point: loads config and starts the proxy. |
+| `cmd/config/config.go`  | Environment-variable configuration loading. |
+| `cmd/proxy/proxy.go`    | LDAP server setup and lifecycle. |
+| `cmd/proxy/handlers.go` | Bind/Search/Close handlers, session pool, rate limiting. |
+| `cmd/proxy/cache.go`    | In-memory TTL cache for search responses. |
+
+## License
+
+See [LICENSE](LICENSE).
